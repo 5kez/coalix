@@ -338,6 +338,7 @@ async fn metrics_endpoint_is_reserved_and_contract_complete() {
         "coalix_requests_total",
         "coalix_upstream_requests_total",
         "coalix_saved_requests_total",
+        "coalix_rate_limited_total",
         "coalix_flights_active",
         "coalix_waiters",
         "coalix_wait_seconds",

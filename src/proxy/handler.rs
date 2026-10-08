@@ -1,4 +1,5 @@
-//! Request dispatch: routing → coalescing decision → leader / waiter / replay.
+//! Request dispatch: metrics shortcut → rate-limit admission → engine
+//! routing → coalescing decision → leader / waiter / replay → access log.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use crate::cache::{Cache, Lookup};
 use crate::coalescer::{Coalescer, FlightKey, Join, SharedResponse};
 use crate::config::Config;
 use crate::metrics::{LiveGauges, Metrics};
+use crate::ratelimit::RateLimiter;
 use crate::resilience::{fallback_response, CircuitBreaker, Permit};
 
 use super::access::{self, AccessRecord};
@@ -48,6 +50,8 @@ pub(crate) struct Handler {
     cache: Arc<Cache>,
     breaker: Arc<CircuitBreaker>,
     metrics: Arc<Metrics>,
+    /// Edge admission (None while `rate_limit.enabled` is false).
+    rate_limiter: Option<RateLimiter>,
 }
 
 impl Handler {
@@ -60,12 +64,20 @@ impl Handler {
         // server keeps its three-argument construction.
         let cache = Arc::new(Cache::new(&config.cache));
         let breaker = Arc::new(CircuitBreaker::new(&config.resilience.circuit_breaker));
+        // Policy objects derive purely from configuration, so the server
+        // keeps its three-argument construction; the limiter exists only
+        // while the switch is on, making the disabled path branch-free.
+        let rate_limiter = config
+            .rate_limit
+            .enabled
+            .then(|| RateLimiter::new(&config.rate_limit));
         Self {
             config,
             upstream,
             coalescer,
             cache,
             breaker,
+            rate_limiter,
             metrics: Arc::new(Metrics::default()),
         }
     }
@@ -100,6 +112,9 @@ impl Handler {
         let version = parts.version;
         let response = if is_metrics {
             self.serve_metrics(&parts)
+        } else if let Some(denied) = self.rate_limit_response(client) {
+            // Rejected before dispatch: no buffering, no routing, no dial.
+            denied
         } else {
             self.dispatch(parts, body).await
         };
@@ -323,6 +338,35 @@ impl Handler {
                 .header(hyper::header::CONTENT_TYPE, crate::metrics::CONTENT_TYPE)
                 .body(full_body(Bytes::from(body))),
         )
+    }
+
+    /// Edge admission: when the per-IP token bucket denies `client`, the 429
+    /// is answered right here — before body buffering, routing, the cache,
+    /// the coalescer, or any upstream dial — and counted once in
+    /// `coalix_rate_limited_total` (rejected requests never enter
+    /// `coalix_requests_total`). The access log still records the exchange.
+    fn rate_limit_response(&self, client: SocketAddr) -> Option<Response<OutBody>> {
+        let limiter = self.rate_limiter.as_ref()?;
+        let retry_after = match limiter.check(client.ip()) {
+            Ok(()) => return None,
+            Err(retry_after) => retry_after,
+        };
+        // Retry-After is whole seconds; round up so a client returning
+        // early does not immediately burn another denial.
+        let seconds = retry_after
+            .as_secs()
+            .saturating_add(u64::from(retry_after.subsec_nanos() > 0))
+            .max(1);
+        self.metrics.record_rate_limited();
+        Some(finish(
+            Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .header(hyper::header::RETRY_AFTER, seconds.to_string())
+                .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(full_body(Bytes::from_static(
+                    b"coalix: rate limit exceeded",
+                ))),
+        ))
     }
 
     fn fallback(&self) -> Response<OutBody> {

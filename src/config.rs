@@ -19,7 +19,8 @@
 //! * strictly lowercase, non-empty `key_headers`,
 //! * absolute route paths with no duplicate `(matcher, path)` pair,
 //! * `log_level` in `trace|debug|info|warn|error`,
-//! * `metrics_path` starting with `/`, fallback status within `100..=599`.
+//! * `metrics_path` starting with `/`, fallback status within `100..=599`,
+//! * `rate_limit` counters positive while the limiter is enabled.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -76,6 +77,8 @@ pub struct Config {
     pub cache: CacheConfig,
     /// Timeouts, circuit breaker, and fallback response.
     pub resilience: ResilienceConfig,
+    /// Per-client-IP token bucket at the edge.
+    pub rate_limit: RateLimitConfig,
     /// Metrics endpoint and logging.
     pub observability: ObservabilityConfig,
 }
@@ -289,6 +292,37 @@ impl Default for FallbackConfig {
     }
 }
 
+/// Per-client-IP request admission: a token bucket checked at the very edge
+/// of the pipeline, before body buffering, routing, or any upstream dial.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RateLimitConfig {
+    /// Master switch — off by default: turning it on is a deployment
+    /// decision (everything behind one load balancer shares an egress IP).
+    pub enabled: bool,
+    /// Sustained requests per second, per client IP.
+    pub requests_per_second: u64,
+    /// Bucket depth: tokens stocked at rest, allowing this many immediate
+    /// requests before refill paces the client (two seconds at the default
+    /// rate).
+    pub burst: u64,
+    /// Approximate cap on tracked client IPs. The table sweeps idle buckets
+    /// on insertion, and while full answers unknown IPs with 429 — bounded
+    /// memory wins over reachability under address-spoofing load.
+    pub max_tracked_clients: usize,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            requests_per_second: 100,
+            burst: 200,
+            max_tracked_clients: 65_536,
+        }
+    }
+}
+
 /// Metrics endpoint, logging verbosity, and log encoding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -492,6 +526,31 @@ impl Config {
                 });
             }
         }
+        if let Some(value) = resolver("COALIX_RATE_LIMIT_ENABLED") {
+            self.rate_limit.enabled = parse_bool("COALIX_RATE_LIMIT_ENABLED", &value)?;
+        }
+        if let Some(value) = resolver("COALIX_RATE_LIMIT_RPS") {
+            let parsed = value
+                .trim()
+                .parse::<u64>()
+                .map_err(|reason| ConfigError::Env {
+                    key: "COALIX_RATE_LIMIT_RPS".to_owned(),
+                    value: value.clone(),
+                    reason: format!("requests_per_second must be an unsigned integer: {reason}"),
+                })?;
+            self.rate_limit.requests_per_second = parsed;
+        }
+        if let Some(value) = resolver("COALIX_RATE_LIMIT_BURST") {
+            let parsed = value
+                .trim()
+                .parse::<u64>()
+                .map_err(|reason| ConfigError::Env {
+                    key: "COALIX_RATE_LIMIT_BURST".to_owned(),
+                    value: value.clone(),
+                    reason: format!("burst must be an unsigned integer: {reason}"),
+                })?;
+            self.rate_limit.burst = parsed;
+        }
         Ok(())
     }
 }
@@ -538,6 +597,17 @@ impl Config {
         if self.cache.enabled {
             positive(self.cache.ttl_ms, "cache.ttl_ms")?;
             positive(self.cache.max_entries as u64, "cache.max_entries")?;
+        }
+        if self.rate_limit.enabled {
+            positive(
+                self.rate_limit.requests_per_second,
+                "rate_limit.requests_per_second",
+            )?;
+            positive(self.rate_limit.burst, "rate_limit.burst")?;
+            positive(
+                self.rate_limit.max_tracked_clients as u64,
+                "rate_limit.max_tracked_clients",
+            )?;
         }
 
         let base = self.upstream.base_url.trim();
@@ -901,6 +971,75 @@ mod tests {
         assert!(Config::from_yaml("serverz: {}").is_err());
         assert!(Config::from_yaml("server: {nodelay: true}").is_err());
         assert!(Config::from_yaml("coalescing: {enabledz: true}").is_err());
+    }
+
+    #[test]
+    fn rate_limit_defaults_are_conservative_and_valid() {
+        let config = Config::default();
+        // Off by default: enabling admission control is a deployment
+        // decision, not a zero-config assumption.
+        assert!(!config.rate_limit.enabled);
+        config.validate().expect("defaults must validate");
+        assert_eq!(config.rate_limit.requests_per_second, 100);
+        assert_eq!(config.rate_limit.burst, 200);
+        assert_eq!(config.rate_limit.max_tracked_clients, 65_536);
+    }
+
+    #[test]
+    fn zero_rate_limit_values_fail_validation_only_when_enabled() {
+        let mut config = Config::default();
+        config.rate_limit.requests_per_second = 0;
+        config
+            .validate()
+            .expect("a disabled limiter tolerates zeroed knobs");
+        config.rate_limit.enabled = true;
+        let message = config
+            .validate()
+            .expect_err("zero requests_per_second must be rejected")
+            .to_string();
+        assert!(message.contains("rate_limit.requests_per_second"));
+
+        let mut config = Config::default();
+        config.rate_limit.enabled = true;
+        config.rate_limit.burst = 0;
+        assert!(config.validate().is_err(), "zero burst must be rejected");
+
+        let mut config = Config::default();
+        config.rate_limit.enabled = true;
+        config.rate_limit.max_tracked_clients = 0;
+        assert!(
+            config.validate().is_err(),
+            "zero max_tracked_clients must be rejected"
+        );
+    }
+
+    #[test]
+    fn rate_limit_env_overrides_are_parsed() {
+        let mut config = Config::default();
+        config
+            .apply_env_overrides_with(|key| match key {
+                "COALIX_RATE_LIMIT_ENABLED" => Some("on".to_owned()),
+                "COALIX_RATE_LIMIT_RPS" => Some("250".to_owned()),
+                "COALIX_RATE_LIMIT_BURST" => Some("500".to_owned()),
+                _ => None,
+            })
+            .expect("overrides must parse");
+        assert!(config.rate_limit.enabled);
+        assert_eq!(config.rate_limit.requests_per_second, 250);
+        assert_eq!(config.rate_limit.burst, 500);
+        config.validate().expect("overridden limiter must validate");
+
+        let mut config = Config::default();
+        let error = config
+            .apply_env_overrides_with(|key| match key {
+                "COALIX_RATE_LIMIT_RPS" => Some("fast".to_owned()),
+                _ => None,
+            })
+            .expect_err("fast is not an integer");
+        match error {
+            ConfigError::Env { key, .. } => assert_eq!(key, "COALIX_RATE_LIMIT_RPS"),
+            other => panic!("expected the Env variant, found {other:?}"),
+        }
     }
 
     #[test]

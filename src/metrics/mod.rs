@@ -25,6 +25,7 @@
 //! | `coalix_requests_total{route,method,coalesced}` | one per handled request; `coalesced` is the *routing decision* |
 //! | `coalix_upstream_requests_total` | dials that actually left the proxy (leader, bypass, revalidation) |
 //! | `coalix_saved_requests_total` | herd members replayed from another request's flight |
+//! | `coalix_rate_limited_total` | requests rejected at the edge by the per-IP limiter |
 //! | `coalix_wait_seconds` / `coalix_upstream_seconds` | parked time / dial latency histograms |
 //! | gauges | flights tracked, waiters parked, cache rows + counters, breaker phase (0 closed, 1 half-open, 2 open) |
 
@@ -150,6 +151,7 @@ pub struct Metrics {
     requests: DashMap<String, AtomicU64>,
     upstream_requests: AtomicU64,
     saved_requests: AtomicU64,
+    rate_limited: AtomicU64,
     waiters: AtomicU64,
     wait_seconds: Histogram,
     upstream_seconds: Histogram,
@@ -176,6 +178,11 @@ impl Metrics {
     /// One herd member was replayed from another request's flight.
     pub fn record_saved(&self) {
         self.saved_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One request rejected at the edge by the per-IP rate limiter.
+    pub fn record_rate_limited(&self) {
+        self.rate_limited.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Latency of one upstream dial (leader, bypass, or revalidation).
@@ -235,6 +242,12 @@ impl Metrics {
             "coalix_saved_requests_total",
             "Herd members answered from another request's flight.",
             self.saved_requests.load(Ordering::Relaxed),
+        );
+        emit_counter(
+            &mut out,
+            "coalix_rate_limited_total",
+            "Requests rejected at the edge by the per-IP rate limiter.",
+            self.rate_limited.load(Ordering::Relaxed),
         );
         emit_gauge(
             &mut out,
@@ -380,6 +393,7 @@ mod tests {
             "coalix_requests_total",
             "coalix_upstream_requests_total",
             "coalix_saved_requests_total",
+            "coalix_rate_limited_total",
             "coalix_flights_active",
             "coalix_waiters",
             "coalix_wait_seconds",

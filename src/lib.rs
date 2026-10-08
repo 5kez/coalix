@@ -29,6 +29,7 @@
 //! | `cache`       | 3     | micro-cache with stale-while-revalidate            |
 //! | `resilience`  | 3     | timeouts, circuit breaker, fallback response       |
 //! | `metrics`     | 4     | lock-free `AtomicU64` registry + `/metrics`        |
+//! | `ratelimit`   | 5     | per-IP token bucket at the edge (429/Retry-After)   |
 //! | `tests/`      | 4     | herd-simulation harness + integration tests        |
 //! | `benches/`    | 4     | Criterion micro-benchmarks                         |
 //! | `.github/`    | 4     | CI pipeline (fmt, clippy, test, MSRV)              |
@@ -53,6 +54,9 @@ pub mod resilience;
 
 /// Lock-free metrics registry and the reserved `/metrics` exposition.
 pub mod metrics;
+
+/// Per-IP token-bucket admission control at the proxy edge.
+pub mod ratelimit;
 
 /// Hyper reverse proxy: accept loop, upstream pool, request routing.
 pub mod proxy;

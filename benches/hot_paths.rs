@@ -16,8 +16,9 @@ use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri};
 
 use coalix::cache::Cache;
 use coalix::coalescer::{FlightKey, SharedResponse};
-use coalix::config::CacheConfig;
+use coalix::config::{CacheConfig, RateLimitConfig};
 use coalix::metrics::{LiveGauges, Metrics};
+use coalix::ratelimit::RateLimiter;
 use coalix::resilience::BreakerPhase;
 
 /// Key derivation: hashing method + path + query + spilled key headers —
@@ -94,10 +95,31 @@ fn bench_metrics_record_and_render(c: &mut Criterion) {
     });
 }
 
+/// Edge admission: one bucket check per request — the only new cost on the
+/// hot path while rate limiting is enabled (disabled costs one `None`
+/// branch, which this bench also exercises through the always-admitting
+/// configuration below).
+fn bench_rate_limit_check(c: &mut Criterion) {
+    let limiter = RateLimiter::new(&RateLimitConfig {
+        enabled: true,
+        // A deep bucket at a huge rate keeps every iteration on the
+        // admit path, so the bench measures lookup + refill arithmetic
+        // rather than denial handling.
+        requests_per_second: 1_000_000,
+        burst: 1_000_000,
+        ..RateLimitConfig::default()
+    });
+    let client: std::net::IpAddr = "198.51.100.7".parse().expect("bench ip");
+    c.bench_function("ratelimit_check_admit", |b| {
+        b.iter(|| black_box(limiter.check(black_box(client))))
+    });
+}
+
 criterion_group!(
     benches,
     bench_flight_key,
     bench_cache_roundtrip,
-    bench_metrics_record_and_render
+    bench_metrics_record_and_render,
+    bench_rate_limit_check
 );
 criterion_main!(benches);

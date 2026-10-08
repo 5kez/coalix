@@ -61,6 +61,16 @@ resilience:
     status_code: 503
     body: 'upstream unavailable - coalix fallback'
 
+# Per-client-IP token bucket at the edge - checked after the reserved
+# metrics shortcut and BEFORE body buffering, routing, or any upstream dial.
+# Off by default: enable only when Coalix sees real client IPs. Everything
+# behind one load balancer shares its egress IP and would share one bucket.
+rate_limit:
+  enabled: false
+  requests_per_second: 100     # sustained budget per client IP
+  burst: 200                   # bucket depth (2s at the default rate)
+  max_tracked_clients: 65536   # bounded table; idle buckets are swept
+
 observability:
   metrics_path: '/metrics'
   log_level: 'info'                    # trace | debug | info | warn | error
