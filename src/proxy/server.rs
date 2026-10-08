@@ -92,9 +92,11 @@ async fn accept_loop(
         let handler = handler.clone();
         let connection = http1::Builder::new().serve_connection(
             TokioIo::new(stream),
+            // `peer` is Copy: every request carries the remote address for
+            // the access log without extra socket work.
             service_fn(move |request| {
                 let handler = handler.clone();
-                async move { Ok::<_, Infallible>(handler.call(request).await) }
+                async move { Ok::<_, Infallible>(handler.call(peer, request).await) }
             }),
         );
         // Detach the task; the permit moves in and drops with the

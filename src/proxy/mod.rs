@@ -16,6 +16,7 @@
 //! be replayable for its whole dedup tail anyway, so byte-perfect replay
 //! afterwards costs only reference-counted `Bytes` clones.
 
+mod access;
 mod client;
 mod handler;
 mod server;

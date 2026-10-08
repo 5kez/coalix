@@ -1,5 +1,6 @@
 //! Request dispatch: routing → coalescing decision → leader / waiter / replay.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -20,6 +21,7 @@ use crate::config::Config;
 use crate::metrics::{LiveGauges, Metrics};
 use crate::resilience::{fallback_response, CircuitBreaker, Permit};
 
+use super::access::{self, AccessRecord};
 use super::Upstream;
 use super::UpstreamError;
 use super::{finish, full_body, replay_response, sanitize_headers, OutBody};
@@ -68,23 +70,63 @@ impl Handler {
         }
     }
 
-    /// Serves one request. `B` is generic so tests may inject bodies; the
-    /// server path always hands in hyper's streaming `Incoming`.
+    /// Serves one request arriving from peer `client` — the remote address
+    /// feeds the access log (and any future per-IP policy). `B` is generic
+    /// so tests may inject bodies; the server path always hands in hyper's
+    /// streaming `Incoming`.
     ///
     /// Request bodies are buffered before dispatch (phase 2 limitation — no
     /// upload streaming); coalescable methods are bodyless by policy, so
     /// the buffer only affects mutations, which bypass the engine anyway.
-    pub(crate) async fn call<B>(&self, request: Request<B>) -> Response<OutBody>
+    pub(crate) async fn call<B>(&self, client: SocketAddr, request: Request<B>) -> Response<OutBody>
     where
         B: Body<Data = Bytes> + Send + 'static,
         B::Error: Into<super::BoxError> + Send + 'static,
     {
+        let started = Instant::now();
         let (parts, body) = request.into_parts();
         // Phase 4: `/metrics` is reserved ahead of buffering, routing, and
-        // coalescing — a scrape must stay invisible to every other metric.
-        if parts.uri.path() == self.config.observability.metrics_path {
-            return self.serve_metrics(&parts);
+        // coalescing — a scrape must stay invisible to every other metric
+        // *and* to the access log.
+        let is_metrics = parts.uri.path() == self.config.observability.metrics_path;
+        // The request line is captured before dispatch consumes `parts`; the
+        // access record needs nothing else from the request head.
+        let method = parts.method.as_str().to_owned();
+        let path = parts
+            .uri
+            .path_and_query()
+            .map(|target| target.as_str().to_owned())
+            .unwrap_or_else(|| parts.uri.path().to_owned());
+        let version = parts.version;
+        let response = if is_metrics {
+            self.serve_metrics(&parts)
+        } else {
+            self.dispatch(parts, body).await
+        };
+        if !is_metrics && self.config.observability.access_log.enabled {
+            let record = AccessRecord {
+                client: client.ip(),
+                method,
+                path,
+                version,
+                status: response.status().as_u16(),
+                latency: started.elapsed(),
+                bytes: response_bytes(&response),
+            };
+            access::emit(&self.config.observability, &record);
         }
+        response
+    }
+
+    /// The full dispatch pipeline: body buffering → request accounting →
+    /// micro-cache → coalescer → breaker-guarded upstream. This used to be
+    /// the body of `call`; the access log turned `call` into a wrapper that
+    /// times the stage and records the outcome for every non-reserved path.
+    async fn dispatch<B>(&self, parts: Parts, body: B) -> Response<OutBody>
+    where
+        B: Body<Data = Bytes> + Send + 'static,
+        B::Error: Into<super::BoxError> + Send + 'static,
+    {
         let buffered = match body.collect().await {
             Ok(collected) => collected.to_bytes(),
             Err(err) => {
@@ -425,6 +467,18 @@ impl Handler {
 /// record directly at their call sites. Consumes the permit.
 fn settle_breaker(permit: Permit<'_>, status: StatusCode) {
     permit.record_status(status);
+}
+
+/// Response body length for the access log: `Content-Length` when the head
+/// states one, otherwise the body's exact size hint while it is bound —
+/// streaming replies of unknown length log as `-`.
+fn response_bytes(response: &Response<OutBody>) -> Option<u64> {
+    response
+        .headers()
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .or_else(|| response.body().size_hint().exact())
 }
 
 /// Origin-form target (`/path?query`) of a client URI — even when the

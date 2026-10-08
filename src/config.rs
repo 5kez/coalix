@@ -299,6 +299,8 @@ pub struct ObservabilityConfig {
     pub log_level: String,
     /// Encoding of emitted events.
     pub log_format: LogFormat,
+    /// Structured access log: one line per finished request.
+    pub access_log: AccessLogConfig,
 }
 
 impl Default for ObservabilityConfig {
@@ -307,6 +309,7 @@ impl Default for ObservabilityConfig {
             metrics_path: "/metrics".to_owned(),
             log_level: "info".to_owned(),
             log_format: LogFormat::Text,
+            access_log: AccessLogConfig::default(),
         }
     }
 }
@@ -320,6 +323,46 @@ pub enum LogFormat {
     Text,
     /// Structured JSON (one object per line) for log shippers.
     Json,
+}
+
+/// Structured access log: one line per finished request, written straight to
+/// stdout.
+///
+/// The access log is independent of `log_level`: when enabled, every finished
+/// request produces exactly one line regardless of tracing verbosity. The
+/// reserved metrics path is never recorded — a scrape must stay invisible to
+/// every observable, logs included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AccessLogConfig {
+    /// Master switch (one stdout line per request when true).
+    pub enabled: bool,
+    /// `auto` follows `observability.log_format`, `json` forces one JSON
+    /// object per line, `clf` writes NCSA Common Log Format with UTC
+    /// timestamps for offline log analyzers (GoAccess, AWStats, …).
+    pub format: AccessLogFormat,
+}
+
+impl Default for AccessLogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            format: AccessLogFormat::Auto,
+        }
+    }
+}
+
+/// Encoding of access-log lines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccessLogFormat {
+    /// Follow `observability.log_format`: text line or JSON object.
+    #[default]
+    Auto,
+    /// One JSON object per line, always.
+    Json,
+    /// NCSA Common Log Format, UTC (`+0000`) timestamps.
+    Clf,
 }
 
 /// Parses a truthy/falsey COALIX_* override value.
@@ -425,6 +468,27 @@ impl Config {
                     key: "COALIX_LOG_FORMAT".to_owned(),
                     value,
                     reason: "expected a log format: text or json".to_owned(),
+                });
+            }
+        }
+        if let Some(value) = resolver("COALIX_ACCESS_LOG_ENABLED") {
+            self.observability.access_log.enabled =
+                parse_bool("COALIX_ACCESS_LOG_ENABLED", &value)?;
+        }
+        if let Some(value) = resolver("COALIX_ACCESS_LOG_FORMAT") {
+            let parsed = match value.as_str() {
+                "auto" => Some(AccessLogFormat::Auto),
+                "json" => Some(AccessLogFormat::Json),
+                "clf" => Some(AccessLogFormat::Clf),
+                _ => None,
+            };
+            if let Some(format) = parsed {
+                self.observability.access_log.format = format;
+            } else {
+                return Err(ConfigError::Env {
+                    key: "COALIX_ACCESS_LOG_FORMAT".to_owned(),
+                    value,
+                    reason: "expected an access log format: auto, json or clf".to_owned(),
                 });
             }
         }
@@ -641,6 +705,11 @@ mod tests {
         assert!(config.is_method_coalescable("GET"));
         assert!(config.is_method_coalescable("head"));
         assert!(!config.is_method_coalescable("POST"));
+        assert!(config.observability.access_log.enabled);
+        assert_eq!(
+            config.observability.access_log.format,
+            AccessLogFormat::Auto
+        );
     }
 
     #[test]
@@ -732,6 +801,32 @@ mod tests {
         assert!(!config.coalescing.enabled);
         assert_eq!(config.observability.log_level, "debug");
         config.validate().expect("overridden config must validate");
+    }
+
+    #[test]
+    fn access_log_env_overrides_are_parsed() {
+        let mut config = Config::default();
+        config
+            .apply_env_overrides_with(|key| match key {
+                "COALIX_ACCESS_LOG_ENABLED" => Some("false".to_owned()),
+                "COALIX_ACCESS_LOG_FORMAT" => Some("clf".to_owned()),
+                _ => None,
+            })
+            .expect("overrides must parse");
+        assert!(!config.observability.access_log.enabled);
+        assert_eq!(config.observability.access_log.format, AccessLogFormat::Clf);
+
+        let mut config = Config::default();
+        let error = config
+            .apply_env_overrides_with(|key| match key {
+                "COALIX_ACCESS_LOG_FORMAT" => Some("combined".to_owned()),
+                _ => None,
+            })
+            .expect_err("combined is not an access log format");
+        match error {
+            ConfigError::Env { key, .. } => assert_eq!(key, "COALIX_ACCESS_LOG_FORMAT"),
+            other => panic!("expected the Env variant, found {other:?}"),
+        }
     }
 
     #[test]
