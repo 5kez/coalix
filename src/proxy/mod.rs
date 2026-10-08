@@ -5,6 +5,12 @@
 //! * an accept loop with a hard connection cap (hyper HTTP/1, keep-alive);
 //! * one pooled upstream client (per-dial connect timeout, bounded idle
 //!   pool — [`UpstreamConfig`]);
+//! * edge admission: the reserved metrics path answers first (never
+//!   throttled, never logged), then the opt-in per-IP token bucket may
+//!   reject with 429 + `Retry-After` before any I/O happens;
+//! * access accounting: every non-reserved request finishes with exactly
+//!   one stdout access line (`auto`/`json`/`clf`), independent of the
+//!   tracing level;
 //! * dispatch: [`Config::should_coalesce`] decides *whether* a request may
 //!   enter the engine at all — mutations never reach it — then
 //!   leader / waiter / tail-replay;

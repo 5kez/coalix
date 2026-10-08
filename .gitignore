@@ -2,6 +2,7 @@
 **/*.rs.bk
 *.pdb
 *.ilk
+*.log
 .env
 .idea/
 .vscode/
