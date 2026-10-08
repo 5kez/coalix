@@ -7,7 +7,7 @@
 *10,000 identical requests in. A single backend query out. Everybody gets the answer.*
 
 [![status](https://img.shields.io/badge/status-alpha-orange?style=flat-square)](https://github.com/coalix-rs/coalix)
-[![Rust](https://img.shields.io/badge/rust-1.82+-dea584?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.85+-dea584?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![tokio](https://img.shields.io/badge/tokio-1.x-E02C51?style=flat-square)](https://tokio.rs)
 [![hyper](https://img.shields.io/badge/hyper-1.x-0f76aa?style=flat-square)](https://hyper.rs)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=flat-square)](#-license)
@@ -131,7 +131,7 @@ path. The request pipeline is a straight line with a side door for waiters:
 | "src/metrics/" | counters, histograms, Prometheus exposition | done |
 | "benches/, tests/" | herd-simulation integration test, criterion benchmarks | done |
 | "examples/slow_backend.rs" | slow dummy upstream for sandbox load tests | done |
-| ".github/workflows/" | CI: fmt, clippy -D warnings, tests, MSRV 1.82 | done |
+| ".github/workflows/" | CI: fmt, clippy -D warnings, tests, MSRV 1.85 | done |
 
 Design rules the whole codebase obeys:
 
@@ -458,7 +458,7 @@ What the suite pins down today:
 
 Continuous integration (`.github/workflows/ci.yml`) runs the same gates on
 every push and pull request: fmt, clippy with `-D warnings`, check and test
-over all targets, `coalix --check` on the example config, and an MSRV 1.82
+over all targets, `coalix --check` on the example config, and an MSRV 1.85
 job.
 
 ---

@@ -2,7 +2,7 @@
 name = 'coalix'
 version = '0.1.0'
 edition = '2021'
-rust-version = '1.82'
+rust-version = '1.85'
 authors = ['Coalix Contributors']
 description = 'Zero-config, blazing-fast request-coalescing reverse proxy for the thundering-herd problem.'
 documentation = 'https://docs.rs/coalix'
