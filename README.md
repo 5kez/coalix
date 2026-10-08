@@ -6,7 +6,7 @@
 
 *10,000 identical requests in. A single backend query out. Everybody gets the answer.*
 
-[![status](https://img.shields.io/badge/status-alpha-orange?style=flat-square)](https://github.com/coalix-rs/coalix)
+[![status](https://img.shields.io/badge/status-alpha-orange?style=flat-square)](https://github.com/5kez/coalix)
 [![Rust](https://img.shields.io/badge/rust-1.85+-dea584?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![tokio](https://img.shields.io/badge/tokio-1.x-E02C51?style=flat-square)](https://tokio.rs)
 [![hyper](https://img.shields.io/badge/hyper-1.x-0f76aa?style=flat-square)](https://hyper.rs)
@@ -758,7 +758,7 @@ cargo fmt --check
 
 ## 🤝 Contributing
 
-Issues, ideas, and PRs are welcome at "github.com/coalix-rs/coalix".
+Issues, ideas, and PRs are welcome at "github.com/5kez/coalix".
 Every change must clear the same gates CI runs:
 
 ```bash
