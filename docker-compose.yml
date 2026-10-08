@@ -1,0 +1,19 @@
+# Coalix one-command demo.
+# Start a toy backend on the host first:  python -m http.server 3000
+services:
+  coalix:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: coalix:local
+    container_name: coalix
+    ports:
+      - '8080:8080'
+    volumes:
+      - ./config/coalix.example.yaml:/etc/coalix/config.yaml:ro
+    environment:
+      RUST_LOG: info
+      COALIX_UPSTREAM_BASE_URL: 'http://host.docker.internal:3000'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    restart: unless-stopped

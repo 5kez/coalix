@@ -1,0 +1,67 @@
+# Coalix - example configuration --------------------------------------------------
+
+# Every key here is OPTIONAL: delete any of them and Coalix falls back to the
+# built-in zero-config defaults (see Config::default in src/config.rs).
+
+# Validate before deploying:
+
+#     coalix --config config/coalix.example.yaml --check
+
+server:
+  listen: '0.0.0.0:8080'     # address Coalix binds to
+  max_connections: 65536      # concurrent connection cap for the accept loop
+  tcp_nodelay: true           # low-latency proxying (disable Nagle)
+
+upstream:
+  base_url: 'http://127.0.0.1:3000'   # backend origin, http or https
+  connect_timeout_ms: 1000            # TCP connect budget
+  request_timeout_ms: 5000            # full request budget (leader timeout)
+  max_idle_per_host: 128              # keep-alive pool per upstream host
+
+coalescing:
+  enabled: true                        # global on/off switch
+  default_coalesce: true               # applies to requests matching no route
+  max_inflight_waiters: 4096           # waiter cap per in-flight group
+  max_wait_ms: 2000                    # longest a waiter may stay parked
+  dedup_window_ms: 50                  # re-arm delay after a flight (0 = immediate)
+  coalesce_methods: ['GET', 'HEAD']    # ONLY these methods may ever coalesce
+  key_headers: ['accept-language']     # headers that split the coalescing key
+
+# Ordered rules - the FIRST matching route wins.
+# matcher is exact or prefix; coalesce false bypasses the engine entirely.
+routes:
+  - name: 'product-detail'
+    path: '/api/products/'
+    matcher: prefix
+    coalesce: true
+  - name: 'checkout'
+    path: '/api/checkout'
+    matcher: exact
+    coalesce: false      # never share responses for this path
+  - name: 'search'
+    path: '/api/search'
+    matcher: prefix
+    coalesce: false      # per-query results vary too much to share
+
+cache:
+  enabled: true                        # micro-cache with stale-while-revalidate
+  ttl_ms: 2000                         # fresh window
+  stale_while_revalidate_ms: 30000     # serve stale, refresh in the background
+  max_entries: 10000                   # bounded LRU
+
+resilience:
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 5               # failures inside the window open the circuit
+    sampling_window_ms: 10000          # rolling window
+    open_timeout_ms: 30000             # cooldown before probing again
+    half_open_max_calls: 3             # probe requests allowed while half-open
+  fallback:
+    enabled: true                      # used when the breaker is open or upstream times out
+    status_code: 503
+    body: 'upstream unavailable - coalix fallback'
+
+observability:
+  metrics_path: '/metrics'
+  log_level: 'info'                    # trace | debug | info | warn | error
+  log_format: text                     # text | json
